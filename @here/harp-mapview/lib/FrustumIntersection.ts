@@ -37,7 +37,8 @@ export class TileKeyEntry {
         public offset: number = 0,
         public minElevation: number = 0,
         public maxElevation: number = 0,
-        public distance: number = 0
+        public distance: number = 0,
+        public calculationStatus: CalculationStatus | undefined = undefined
     ) {}
 }
 
@@ -160,6 +161,19 @@ export class FrustumIntersection {
             this.mapView.projection.type === ProjectionType.Spherical || useElevationRangeSource;
         const uniqueZoomLevels = new Set(zoomLevels);
 
+        // Gather the minimum and maximum geometry heights of all datasources to enlarge the
+        // bounding boxes of tiles for visibility tests.
+        let minGeometryHeight = Number.MAX_VALUE;
+        let maxGeometryHeight = Number.MIN_VALUE;
+        if (dataSources.length > 0) {
+            dataSources.forEach(dataSource => {
+                minGeometryHeight = Math.min(minGeometryHeight, dataSource.minGeometryHeight);
+                maxGeometryHeight = Math.max(maxGeometryHeight, dataSource.maxGeometryHeight);
+            });
+        } else {
+            minGeometryHeight = maxGeometryHeight = 0;
+        }
+
         const cache = {
             calculationFinal: true,
             tileBounds: obbIntersections ? new OrientedBox3() : new THREE.Box3()
@@ -180,6 +194,8 @@ export class FrustumIntersection {
                 offset,
                 tilingScheme,
                 cache,
+                minGeometryHeight!,
+                maxGeometryHeight!,
                 useElevationRangeSource ? elevationRangeSource : undefined
             );
 
@@ -235,6 +251,8 @@ export class FrustumIntersection {
                     offset,
                     tilingScheme,
                     cache,
+                    minGeometryHeight!,
+                    maxGeometryHeight!,
                     useElevationRangeSource ? elevationRangeSource : undefined
                 );
 
@@ -266,9 +284,12 @@ export class FrustumIntersection {
         offset: number,
         tilingScheme: TilingScheme,
         cache: { calculationFinal: boolean; tileBounds: OrientedBox3 | THREE.Box3 },
+        minGeometryHeight: number,
+        maxGeometryHeight: number,
         elevationRangeSource?: ElevationRangeSource
     ): TileKeyEntry | undefined {
         const geoBox = getGeoBox(tilingScheme, tileKey, offset);
+        let calculationStatus: CalculationStatus | undefined;
 
         // For tiles without elevation range source, default 0 (getGeoBox always
         // returns box with altitude min/max equal to zero) will be propagated as
@@ -278,10 +299,19 @@ export class FrustumIntersection {
             const range = elevationRangeSource!.getElevationRange(tileKey);
             geoBox.southWest.altitude = range.minElevation;
             geoBox.northEast.altitude = range.maxElevation;
+            calculationStatus = range.calculationStatus;
             cache.calculationFinal =
-                cache.calculationFinal &&
-                range.calculationStatus === CalculationStatus.FinalPrecise;
+                cache.calculationFinal && calculationStatus === CalculationStatus.FinalPrecise;
         }
+
+        // Enlarge the bounding boxes of tiles with min/max geometry height for visibility tests.
+        geoBox.southWest.altitude =
+            (geoBox.southWest.altitude !== undefined ? geoBox.southWest.altitude : 0) +
+            minGeometryHeight;
+
+        geoBox.northEast.altitude =
+            (geoBox.northEast.altitude !== undefined ? geoBox.northEast.altitude : 0) +
+            maxGeometryHeight;
 
         this.mapView.projection.projectBox(geoBox, cache.tileBounds);
         const { area, distance } = this.computeTileAreaAndDistance(cache.tileBounds);
@@ -293,6 +323,7 @@ export class FrustumIntersection {
                 offset,
                 geoBox.southWest.altitude, // minElevation
                 geoBox.northEast.altitude, // maxElevation
+                calculationStatus, // status of elevation calculation
                 distance
             );
         }
